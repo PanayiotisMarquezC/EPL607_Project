@@ -32,3 +32,5 @@ If a pixel satisfies the inside-triangle condition, it is colored red (255, 0, 0
 Once the triangle was rendered, the PIL library was used to:
 Save the final image as filled_triangle.png
 Display the image on the screen
+
+![filled_triangle](https://github.com/user-attachments/assets/48049536-dc58-44f3-9378-8c160c7e3a62)
