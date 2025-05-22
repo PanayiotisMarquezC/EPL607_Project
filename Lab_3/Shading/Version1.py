@@ -21,7 +21,7 @@ class Material:
         self.specular = specular
         self.shininess = shininess
 
-light = Light(position=(0, 0, 2), intensity=(1, 1, 1))
+light = Light(position=(0, 0, 1.5), intensity=(1, 1, 1))
 material = Material(diffuse=(0.8, 0.1, 0.1), specular=(1.0, 1.0, 1.0), shininess=32)
 
 # === LOAD MODEL ===

@@ -1,6 +1,7 @@
 import pywavefront
 from PIL import Image
 import math
+import numpy as np
 from collections import defaultdict
 
 # === CONFIG ===
@@ -9,7 +10,10 @@ image = Image.new("RGB", (WIDTH, HEIGHT), "black")
 pixels = image.load()
 z_buffer = [[float('inf')] * WIDTH for _ in range(HEIGHT)]
 
-angle_deg = 200  # Change this to rotate the model left/right
+# === TRANSFORMATION CONTROL ===
+angle_deg = 45
+scale_factor = 1.0
+translation = np.array([0.0, 0.0, 2.5])  # move model forward in z
 
 # === LIGHTING ===
 class Light:
@@ -23,42 +27,55 @@ class Material:
         self.specular = specular
         self.shininess = shininess
 
-light = Light(position=(2, 2, 0), intensity=(1, 1, 1))
+light = Light(position=(0, 0, 2), intensity=(1, 1, 1))
 material = Material(diffuse=(0.8, 0.1, 0.1), specular=(1.0, 1.0, 1.0), shininess=32)
 
 # === LOAD MODEL ===
 pywavefront.logger.setLevel('ERROR')
-scene = pywavefront.Wavefront('man.obj', collect_faces=True, create_materials=True, parse=True, strict=False)
+scene = pywavefront.Wavefront(
+    'man.obj',
+    collect_faces=True,
+    create_materials=True,
+    parse=True,
+    strict=False
+)
 
-# === NORMALIZE VERTICES ===
-all_vertices = [tuple(v[:3]) for v in scene.vertices]
-min_x = min(v[0] for v in all_vertices)
-max_x = max(v[0] for v in all_vertices)
-min_y = min(v[1] for v in all_vertices)
-max_y = max(v[1] for v in all_vertices)
-min_z = min(v[2] for v in all_vertices)
-max_z = max(v[2] for v in all_vertices)
+# === NORMALIZE MODEL TO UNIT CUBE ===
+all_vertices = [np.array(v[:3]) for v in scene.vertices]
+min_bound = np.min(all_vertices, axis=0)
+max_bound = np.max(all_vertices, axis=0)
+center = (min_bound + max_bound) / 2
+scale = 2.5 / np.max(max_bound - min_bound)
 
-center = ((min_x + max_x) / 2, (min_y + max_y) / 2, (min_z + max_z) / 2)
-scale = 2.5 / max(max_x - min_x, max_y - min_y, max_z - min_z)
-
-def rotate_y(vertex, angle_deg):
-    x, y, z = vertex
+# === BUILD TRANSFORMATION MATRIX (scale → rotate → translate) ===
+def build_transformation_matrix(angle_deg, scale_factor, translation_vec):
     angle_rad = math.radians(angle_deg)
-    cos_a = math.cos(angle_rad)
-    sin_a = math.sin(angle_rad)
-    x_new = cos_a * x + sin_a * z
-    z_new = -sin_a * x + cos_a * z
-    return (x_new, y, z_new)
+    cos_a, sin_a = math.cos(angle_rad), math.sin(angle_rad)
 
-def normalize_vertex(v):
-    x, y, z = v[:3]
-    x = (x - center[0]) * scale
-    y = (y - center[1]) * scale
-    z = (z - center[2]) * scale
-    x, y, z = rotate_y((x, y, z), angle_deg)
-    z += 2.5
-    return (x, y, z)
+    # Scaling
+    S = np.diag([scale_factor, scale_factor, scale_factor, 1.0])
+
+    # Rotation Y
+    R = np.array([
+        [cos_a, 0, sin_a, 0],
+        [0,     1, 0,     0],
+        [-sin_a,0, cos_a, 0],
+        [0,     0, 0,     1]
+    ])
+
+    # Translation
+    T = np.identity(4)
+    T[:3, 3] = translation_vec
+
+    return T @ R @ S
+
+transform = build_transformation_matrix(angle_deg, scale, translation)
+
+# === APPLY TRANSFORMATION TO VERTEX ===
+def transform_vertex(v):
+    vec = np.array([v[0], v[1], v[2], 1.0])
+    result = transform @ vec
+    return tuple(result[:3])
 
 # === VECTOR MATH ===
 def subtract(a, b): return tuple(a[i] - b[i] for i in range(3))
@@ -70,14 +87,14 @@ def reflect(L, N):
     dotLN = dot(L, N)
     return tuple(2 * dotLN * N[i] - L[i] for i in range(3))
 
-# === COMPUTE VERTEX NORMALS ===
+# === COMPUTE PER-VERTEX NORMALS ===
 vertex_normals = defaultdict(lambda: [0, 0, 0])
 for mesh in scene.mesh_list:
     for face in mesh.faces:
         if len(face) == 3:
-            v0 = normalize_vertex(scene.vertices[face[0]])
-            v1 = normalize_vertex(scene.vertices[face[1]])
-            v2 = normalize_vertex(scene.vertices[face[2]])
+            v0 = transform_vertex(scene.vertices[face[0]])
+            v1 = transform_vertex(scene.vertices[face[1]])
+            v2 = transform_vertex(scene.vertices[face[2]])
             edge1 = subtract(v1, v0)
             edge2 = subtract(v2, v0)
             face_normal = (
@@ -126,7 +143,7 @@ def project_vertex(v):
 def edge_func(a, b, c):
     return (c[0] - a[0]) * (b[1] - a[1]) - (c[1] - a[1]) * (b[0] - a[0])
 
-# === DRAW TRIANGLES WITH PHONG SHADING & Z-BUFFER ===
+# === RASTERIZATION ===
 def draw_phong(p1, p2, p3, v1, v2, v3, n1, n2, n3):
     min_x = max(min(p1[0], p2[0], p3[0]), 0)
     max_x = min(max(p1[0], p2[0], p3[0]), WIDTH - 1)
@@ -161,9 +178,9 @@ for mesh in scene.mesh_list:
     for face in mesh.faces:
         if len(face) == 3:
             idx0, idx1, idx2 = face
-            v0 = normalize_vertex(scene.vertices[idx0])
-            v1 = normalize_vertex(scene.vertices[idx1])
-            v2 = normalize_vertex(scene.vertices[idx2])
+            v0 = transform_vertex(scene.vertices[idx0])
+            v1 = transform_vertex(scene.vertices[idx1])
+            v2 = transform_vertex(scene.vertices[idx2])
 
             n0 = vertex_normals[idx0]
             n1 = vertex_normals[idx1]
@@ -176,5 +193,5 @@ for mesh in scene.mesh_list:
             draw_phong(p0, p1, p2, v0, v1, v2, n0, n1, n2)
 
 # === OUTPUT ===
-image.save("rendered_phong_zbuffer_rotated.png")
+image.save("frame_000.png")
 image.show()

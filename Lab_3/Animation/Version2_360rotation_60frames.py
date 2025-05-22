@@ -1,17 +1,14 @@
 import pywavefront
 from PIL import Image
 import math
+import numpy as np
 from collections import defaultdict
 
 # === CONFIG ===
 WIDTH, HEIGHT = 1024, 1024
-image = Image.new("RGB", (WIDTH, HEIGHT), "black")
-pixels = image.load()
-z_buffer = [[float('inf')] * WIDTH for _ in range(HEIGHT)]
+TOTAL_FRAMES = 60  # for a full 360° rotation
 
-angle_deg = 200  # Change this to rotate the model left/right
-
-# === LIGHTING ===
+# === LIGHTING & MATERIAL ===
 class Light:
     def __init__(self, position, intensity=(1, 1, 1)):
         self.position = position
@@ -23,44 +20,43 @@ class Material:
         self.specular = specular
         self.shininess = shininess
 
-light = Light(position=(2, 2, 0), intensity=(1, 1, 1))
+light = Light(position=(0, 0, 2), intensity=(1, 1, 1))
 material = Material(diffuse=(0.8, 0.1, 0.1), specular=(1.0, 1.0, 1.0), shininess=32)
 
 # === LOAD MODEL ===
 pywavefront.logger.setLevel('ERROR')
 scene = pywavefront.Wavefront('man.obj', collect_faces=True, create_materials=True, parse=True, strict=False)
 
-# === NORMALIZE VERTICES ===
-all_vertices = [tuple(v[:3]) for v in scene.vertices]
-min_x = min(v[0] for v in all_vertices)
-max_x = max(v[0] for v in all_vertices)
-min_y = min(v[1] for v in all_vertices)
-max_y = max(v[1] for v in all_vertices)
-min_z = min(v[2] for v in all_vertices)
-max_z = max(v[2] for v in all_vertices)
+# === NORMALIZATION ===
+all_vertices = [np.array(v[:3]) for v in scene.vertices]
+min_bound = np.min(all_vertices, axis=0)
+max_bound = np.max(all_vertices, axis=0)
+center = (min_bound + max_bound) / 2
+scale = 2.5 / np.max(max_bound - min_bound)
+translation = np.array([0.0, 0.0, 2.5])
 
-center = ((min_x + max_x) / 2, (min_y + max_y) / 2, (min_z + max_z) / 2)
-scale = 2.5 / max(max_x - min_x, max_y - min_y, max_z - min_z)
-
-def rotate_y(vertex, angle_deg):
-    x, y, z = vertex
+# === TRANSFORMATIONS ===
+def build_transformation_matrix(angle_deg, scale_factor, translation_vec):
     angle_rad = math.radians(angle_deg)
-    cos_a = math.cos(angle_rad)
-    sin_a = math.sin(angle_rad)
-    x_new = cos_a * x + sin_a * z
-    z_new = -sin_a * x + cos_a * z
-    return (x_new, y, z_new)
+    cos_a, sin_a = math.cos(angle_rad), math.sin(angle_rad)
 
-def normalize_vertex(v):
-    x, y, z = v[:3]
-    x = (x - center[0]) * scale
-    y = (y - center[1]) * scale
-    z = (z - center[2]) * scale
-    x, y, z = rotate_y((x, y, z), angle_deg)
-    z += 2.5
-    return (x, y, z)
+    S = np.diag([scale_factor, scale_factor, scale_factor, 1.0])
+    R = np.array([
+        [cos_a, 0, sin_a, 0],
+        [0,     1, 0,     0],
+        [-sin_a,0, cos_a, 0],
+        [0,     0, 0,     1]
+    ])
+    T = np.identity(4)
+    T[:3, 3] = translation_vec
+    return T @ R @ S
 
-# === VECTOR MATH ===
+def transform_vertex(v, matrix):
+    vec = np.array([v[0], v[1], v[2], 1.0])
+    result = matrix @ vec
+    return tuple(result[:3])
+
+# === VECTOR UTILS ===
 def subtract(a, b): return tuple(a[i] - b[i] for i in range(3))
 def dot(a, b): return sum(a[i] * b[i] for i in range(3))
 def normalize_vector(v):
@@ -70,14 +66,14 @@ def reflect(L, N):
     dotLN = dot(L, N)
     return tuple(2 * dotLN * N[i] - L[i] for i in range(3))
 
-# === COMPUTE VERTEX NORMALS ===
+# === VERTEX NORMALS (same across all frames) ===
 vertex_normals = defaultdict(lambda: [0, 0, 0])
 for mesh in scene.mesh_list:
     for face in mesh.faces:
         if len(face) == 3:
-            v0 = normalize_vertex(scene.vertices[face[0]])
-            v1 = normalize_vertex(scene.vertices[face[1]])
-            v2 = normalize_vertex(scene.vertices[face[2]])
+            v0 = (scene.vertices[face[0]][0:3] - center) * scale
+            v1 = (scene.vertices[face[1]][0:3] - center) * scale
+            v2 = (scene.vertices[face[2]][0:3] - center) * scale
             edge1 = subtract(v1, v0)
             edge2 = subtract(v2, v0)
             face_normal = (
@@ -92,27 +88,20 @@ for mesh in scene.mesh_list:
 for idx in vertex_normals:
     vertex_normals[idx] = normalize_vector(vertex_normals[idx])
 
-# === PHONG SHADING ===
+# === SHADING ===
 def compute_phong_color(pos, normal, material, light):
     N = normalize_vector(normal)
     L = normalize_vector(subtract(light.position, pos))
     V = normalize_vector(tuple(-c for c in pos))
-
     if dot(N, L) < 0:
         N = tuple(-n for n in N)
-
     R = reflect(L, N)
-
     ambient = (0.1, 0.1, 0.1)
-    dot_nl = max(dot(N, L), 0)
-    diffuse = tuple(material.diffuse[i] * light.intensity[i] * dot_nl for i in range(3))
-    dot_rv = max(dot(R, V), 0)
-    specular = tuple(material.specular[i] * light.intensity[i] * (dot_rv ** material.shininess) for i in range(3))
-
+    diffuse = tuple(material.diffuse[i] * light.intensity[i] * max(dot(N, L), 0) for i in range(3))
+    specular = tuple(material.specular[i] * light.intensity[i] * (max(dot(R, V), 0) ** material.shininess) for i in range(3))
     color = tuple(min(1, ambient[i] + diffuse[i] + specular[i]) for i in range(3))
     return tuple(int(c * 255) for c in color)
 
-# === PROJECTION ===
 def project_vertex(v):
     x, y, z = v
     if z == 0: z = 1e-5
@@ -122,17 +111,14 @@ def project_vertex(v):
     y_screen = int((1 - y_proj) * HEIGHT / 2)
     return (x_screen, y_screen)
 
-# === EDGE FUNCTION ===
 def edge_func(a, b, c):
     return (c[0] - a[0]) * (b[1] - a[1]) - (c[1] - a[1]) * (b[0] - a[0])
 
-# === DRAW TRIANGLES WITH PHONG SHADING & Z-BUFFER ===
-def draw_phong(p1, p2, p3, v1, v2, v3, n1, n2, n3):
+def draw_phong(p1, p2, p3, v1, v2, v3, n1, n2, n3, pixels, z_buffer):
     min_x = max(min(p1[0], p2[0], p3[0]), 0)
     max_x = min(max(p1[0], p2[0], p3[0]), WIDTH - 1)
     min_y = max(min(p1[1], p2[1], p3[1]), 0)
     max_y = min(max(p1[1], p2[1], p3[1]), HEIGHT - 1)
-
     area = edge_func(p1, p2, p3)
     if area == 0: return
 
@@ -146,35 +132,39 @@ def draw_phong(p1, p2, p3, v1, v2, v3, n1, n2, n3):
                 alpha = w0 / area
                 beta = w1 / area
                 gamma = w2 / area
-
                 pos = tuple(alpha * v1[i] + beta * v2[i] + gamma * v3[i] for i in range(3))
                 z = pos[2]
-
                 if z < z_buffer[y][x]:
                     z_buffer[y][x] = z
                     norm = tuple(alpha * n1[i] + beta * n2[i] + gamma * n3[i] for i in range(3))
-                    color = compute_phong_color(pos, norm, material, light)
-                    pixels[x, y] = color
+                    pixels[x, y] = compute_phong_color(pos, norm, material, light)
 
-# === MAIN LOOP ===
-for mesh in scene.mesh_list:
-    for face in mesh.faces:
-        if len(face) == 3:
-            idx0, idx1, idx2 = face
-            v0 = normalize_vertex(scene.vertices[idx0])
-            v1 = normalize_vertex(scene.vertices[idx1])
-            v2 = normalize_vertex(scene.vertices[idx2])
+# === ANIMATION FRAME LOOP ===
+for frame in range(TOTAL_FRAMES):
+    angle_deg = (frame / TOTAL_FRAMES) * 360
+    print(f"Rendering frame {frame:03d}...")
 
-            n0 = vertex_normals[idx0]
-            n1 = vertex_normals[idx1]
-            n2 = vertex_normals[idx2]
+    transform = build_transformation_matrix(angle_deg, scale, translation)
+    image = Image.new("RGB", (WIDTH, HEIGHT), "black")
+    pixels = image.load()
+    z_buffer = [[float('inf')] * WIDTH for _ in range(HEIGHT)]
 
-            p0 = project_vertex(v0)
-            p1 = project_vertex(v1)
-            p2 = project_vertex(v2)
+    for mesh in scene.mesh_list:
+        for face in mesh.faces:
+            if len(face) == 3:
+                idx0, idx1, idx2 = face
+                v0 = transform_vertex(scene.vertices[idx0][:3] - center, transform)
+                v1 = transform_vertex(scene.vertices[idx1][:3] - center, transform)
+                v2 = transform_vertex(scene.vertices[idx2][:3] - center, transform)
 
-            draw_phong(p0, p1, p2, v0, v1, v2, n0, n1, n2)
+                n0 = vertex_normals[idx0]
+                n1 = vertex_normals[idx1]
+                n2 = vertex_normals[idx2]
 
-# === OUTPUT ===
-image.save("rendered_phong_zbuffer_rotated.png")
-image.show()
+                p0 = project_vertex(v0)
+                p1 = project_vertex(v1)
+                p2 = project_vertex(v2)
+
+                draw_phong(p0, p1, p2, v0, v1, v2, n0, n1, n2, pixels, z_buffer)
+
+    image.save(f"frame_{frame:03d}.png")
