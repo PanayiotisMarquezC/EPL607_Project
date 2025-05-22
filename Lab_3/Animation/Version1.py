@@ -12,8 +12,8 @@ z_buffer = [[float('inf')] * WIDTH for _ in range(HEIGHT)]
 
 # === TRANSFORMATION CONTROL ===
 angle_deg = 90
-scale_factor = 1
-translation = np.array([0.0, 0.0, 0])  # move model forward in z
+scale_factor = 1.5
+translation = np.array([0.0, 0.0, 3.5])  # move model forward in z
 
 # === LIGHTING ===
 class Light:
